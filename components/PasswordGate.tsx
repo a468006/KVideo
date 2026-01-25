@@ -16,6 +16,7 @@ export function PasswordGate({ children, hasEnvPassword: initialHasEnvPassword }
     const [error, setError] = useState(false);
     const [isClient, setIsClient] = useState(false);
     const [hasEnvPassword, setHasEnvPassword] = useState(initialHasEnvPassword);
+    const [persistEnabled, setPersistEnabled] = useState(true);
     const [isValidating, setIsValidating] = useState(false);
 
     useEffect(() => {
@@ -23,9 +24,18 @@ export function PasswordGate({ children, hasEnvPassword: initialHasEnvPassword }
 
         const init = async () => {
             const settings = settingsStore.getSettings();
-            const isUnlocked = sessionStorage.getItem(SESSION_UNLOCKED_KEY) === 'true';
+
+            // Check both storage if persistence might be enabled
+            const getUnlockedState = (canPersist: boolean) => {
+                const sessionUnlocked = sessionStorage.getItem(SESSION_UNLOCKED_KEY) === 'true';
+                if (!canPersist) return sessionUnlocked;
+                const localUnlocked = localStorage.getItem(SESSION_UNLOCKED_KEY) === 'true';
+                return sessionUnlocked || localUnlocked;
+            };
 
             // 1. Initial local check (fast)
+            // Default to canPersist = true for first check if not sure
+            const isUnlocked = getUnlockedState(true);
             const localLocked = (settings.passwordAccess || initialHasEnvPassword) && !isUnlocked;
             if (mounted) setIsLocked(localLocked);
             if (mounted) setIsClient(true);
@@ -39,6 +49,7 @@ export function PasswordGate({ children, hasEnvPassword: initialHasEnvPassword }
 
                 if (mounted) {
                     setHasEnvPassword(data.hasEnvPassword);
+                    setPersistEnabled(data.persistPassword);
 
                     // CRITICAL: Sync subscriptions immediately
                     if (data.subscriptionSources) {
@@ -47,15 +58,15 @@ export function PasswordGate({ children, hasEnvPassword: initialHasEnvPassword }
                     }
 
                     // Re-evaluate lock status with confirmed server state
-                    // We only care about envPassword if we are not unlocked.
-                    // Access control logic:
-                    // Locked IF: (Local setting ON OR Env Password Exists) AND (Not Unlocked)
-                    const confirmLocked = (settings.passwordAccess || data.hasEnvPassword) && !isUnlocked;
+                    // Persistence only works if hasEnvPassword is true
+                    const canPersist = data.hasEnvPassword && data.persistPassword;
+                    const finalUnlocked = getUnlockedState(canPersist);
+
+                    const confirmLocked = (settings.passwordAccess || data.hasEnvPassword) && !finalUnlocked;
                     setIsLocked(confirmLocked);
                 }
             } catch (e) {
                 console.error("PasswordGate init failed:", e);
-                // Fallback: rely on initial/local state which was already set
             }
         };
 
@@ -68,18 +79,12 @@ export function PasswordGate({ children, hasEnvPassword: initialHasEnvPassword }
 
     // Subscribe to settings changes (real-time updates)
     useEffect(() => {
-        // Function to handle updates from the store
         const handleSettingsUpdate = () => {
             const settings = settingsStore.getSettings();
-            const isUnlocked = sessionStorage.getItem(SESSION_UNLOCKED_KEY) === 'true';
+            const canPersist = hasEnvPassword && persistEnabled;
+            const isUnlocked = (sessionStorage.getItem(SESSION_UNLOCKED_KEY) === 'true') ||
+                (canPersist && localStorage.getItem(SESSION_UNLOCKED_KEY) === 'true');
 
-            // We can't easily check env password synchronously here, but we can check local settings.
-            // If local setting says lock, and we are not unlocked, we lock.
-            // If local setting says unlock (and no env password known yet), we unlock.
-            // To be safe, we might just re-run checkLockStatus() but that's async.
-            // For immediate UI feedback on "Enable/Disable Password" toggle in settings:
-
-            // If password access is disabled in settings, and we assume no env password for a moment (or rely on previous state):
             if (!settings.passwordAccess && !hasEnvPassword) {
                 setIsLocked(false);
             } else if (settings.passwordAccess && !isUnlocked) {
@@ -89,7 +94,7 @@ export function PasswordGate({ children, hasEnvPassword: initialHasEnvPassword }
 
         const unsubscribe = settingsStore.subscribe(handleSettingsUpdate);
         return () => unsubscribe();
-    }, [hasEnvPassword]);
+    }, [hasEnvPassword, persistEnabled]);
 
 
 
@@ -98,13 +103,21 @@ export function PasswordGate({ children, hasEnvPassword: initialHasEnvPassword }
         setIsValidating(true);
 
         const settings = settingsStore.getSettings();
+        const canPersist = hasEnvPassword && persistEnabled;
 
-        // First check local passwords
-        if (settings.accessPasswords.includes(password)) {
+        const setUnlocked = () => {
+            if (canPersist) {
+                localStorage.setItem(SESSION_UNLOCKED_KEY, 'true');
+            }
             sessionStorage.setItem(SESSION_UNLOCKED_KEY, 'true');
             setIsLocked(false);
             setError(false);
             setIsValidating(false);
+        };
+
+        // First check local passwords
+        if (settings.accessPasswords.includes(password)) {
+            setUnlocked();
             return;
         }
 
@@ -118,14 +131,11 @@ export function PasswordGate({ children, hasEnvPassword: initialHasEnvPassword }
                 });
                 const data = await res.json();
                 if (data.valid) {
-                    sessionStorage.setItem(SESSION_UNLOCKED_KEY, 'true');
-                    setIsLocked(false);
-                    setError(false);
-                    setIsValidating(false);
+                    setUnlocked();
                     return;
                 }
             } catch {
-                // API error, proceed to show error
+                // API error
             }
         }
 
